@@ -10,8 +10,15 @@ library(bayesplot)
 ```
 
 ```{r}
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+rstan_options(threads_per_chain = 2)
+```
+
+
+```{r}
 base_url <- "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
-query_string <- "select+pl_name,disc_year,pl_rade,pl_orbper,st_met,st_teff,discoverymethod+from+ps+where+default_flag=1&format=csv"
+query_string <- "select+pl_name,disc_year,pl_rade,pl_orbper,st_met,st_teff,discoverymethod,st_mass,sy_pnum+from+ps+where+default_flag=1&format=csv"
 full_url <- paste0(base_url, "?query=", query_string)
 
 raw_planets <- read_csv(full_url)
@@ -20,7 +27,9 @@ clean_data <- raw_planets %>%
   mutate(
     log_radius = log(pl_rade),
     log_period = log(pl_orbper),
-    st_teff_k = st_teff / 1000
+    log_st_mass = log(st_mass),
+    st_teff_k = st_teff / 1000,
+    method_group = fct_lump(discoverymethod, n = 3) 
   ) %>%
   filter(
     !is.na(disc_year),
@@ -28,11 +37,113 @@ clean_data <- raw_planets %>%
     !is.na(log_period),
     !is.na(st_met),
     !is.na(st_teff_k),
-    !is.na(discoverymethod)
+    !is.na(discoverymethod),
+    !is.na(log_st_mass)
   )
+
+print(nrow(clean_data))
+head(clean_data)
+```
+Continuos Parameter Estimation
+```{r}
+y_val <- clean_data$log_period
+N_val <- length(y_val)
+```
+
+```{r}
+mu_prior_mean <- 5.0
+mu_prior_sd   <- 5.0 
+```
+
+```{r}
+stan_data_continuous <- list(
+  N    = N_val,
+  y    = y_val,
+  mu0  = mu_prior_mean,
+  tau0 = mu_prior_sd
+)
+
+fit_continuous <- stan(
+  model_code = "
+    data {
+      int<lower=0> N;
+      vector[N] y;
+      real mu0;
+      real tau0;
+    }
+    parameters {
+      real mu;
+      real<lower=0> sigma;
+    }
+    model {
+      // Priors
+      mu ~ normal(mu0, tau0);
+      sigma ~ cauchy(0, 5); // Half-cauchy for scale
+      
+      // Likelihood
+      y ~ normal(mu, sigma);
+    }
+  ",
+  data = stan_data_continuous,
+  iter = 10000,
+  chains = 4
+)
+```
+
+```{r}
+print(fit_continuous, pars = c("mu", "sigma"))
+
+mcmc_trace(fit_continuous, pars = "mu") + ggtitle("Trace Plot for Mu (Log Period)")
+mcmc_dens(fit_continuous, pars = "mu") + ggtitle("Density Plot for Mu (Log Period)")
+mcmc_acf(fit_continuous, pars = c("mu", "sigma")) + ggtitle("Autocorrelation for Mu and Sigma")
+```
+
+
+```{r}
+sigma_data <- sd(y_val)
+y_bar      <- mean(y_val)
+
+prior_prec <- 1 / (mu_prior_sd^2)
+data_prec  <- N_val / (sigma_data^2)
+
+post_var_theo <- 1 / (prior_prec + data_prec)
+
+post_mean_theo <- post_var_theo * ( (mu_prior_mean * prior_prec) + (y_bar * data_prec) )
+
+mcmc_mean <- summary(fit_continuous)$summary["mu", "mean"]
+
+cat("Comparison of Posterior Means for Log Period:\n")
+cat(sprintf("Theoretical (Approx): %.4f\n", post_mean_theo))
+cat(sprintf("MCMC Estimate (Stan): %.4f\n", mcmc_mean))
 ```
 
 
 
+```{r}
+fit_stanarm <- stan_glm(
+  log_period ~ log_st_mass + st_teff_k + st_met + sy_pnum,
+  data = clean_data,
+  family = gaussian(),
+  
+  prior = normal(location = 0, scale = 2.5, autoscale = TRUE),
+  prior_intercept = normal(location = 0, scale = 10, autoscale = TRUE),
+  prior_aux = exponential(rate = 1, autoscale = TRUE), 
+  
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
 
 
+```{r}
+
+summary(fit_stanarm)
+
+plot(fit_stanarm, "trace", pars = "(Intercept)")
+plot(fit_stanarm, "trace", pars = "sy_pnum")
+
+plot(fit_stanarm, "acf", pars = "sy_pnum")
+
+plot(fit_stanarm, "areas", prob = 0.95, prob_outer = 1)
+```
