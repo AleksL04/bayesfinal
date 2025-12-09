@@ -1,5 +1,6 @@
 ---
 title: "FP"
+author: Aleks Likhoshva, Pratyush Jha
 output: html_document
 ---
 ```{r message=FALSE, warning=FALSE}
@@ -45,18 +46,45 @@ print(nrow(clean_data))
 head(clean_data)
 ```
 
-## Stan model, MCMC
-We model:
-$$y_i \sim Poisson(\lambda)$$
-$$\lambda \sim Gamma(2,0.1)$$
+# Bayesian estimation(Discrete)
 
+## Parameter Definition and Likelihood
+
+We are interested in estimating the rate of exoplanet discoveries per year. Let λ represent the average number of exoplanets discovered annually. Since the data consists of count data (non-negative integers) occurring over a fixed time interval, we model the yearly counts $y_i$ using a Poisson likelihood:
+$$y_i \sim Poisson(\lambda)$$
+## Prior Selection and Justification
+We assume a Gamma prior for the rate parameter λ, as the Gamma distribution is the conjugate prior for the Poisson likelihood and ensures λ remains positive. Specifically, we choose:
+$$\lambda \sim Gamma(2,0.1)$$
+This prior implies a mean discovery rate of E[λ]=α/β=20 planets per year. The variance is α/β2=200, which indicates a large spread. This serves as a weakly informative prior; it centers the search around a plausible magnitude (20) but remains flat enough to allow the data to dominate the posterior distribution if the observed rates are significantly higher or lower.
+
+## Closed Form Posterior
+We model: 
+
+$$\lambda | y \sim Gamma(a + \Sigma y, \beta + N)$$
 ```{r}
 yearly_counts <- clean_data %>%
   count(disc_year) %>%
   rename(n_planets = n)
 
 head(yearly_counts)
+```
 
+```{r}
+alpha_prior <- 2
+beta_prior <- 0.1
+
+sum_y <- sum(yearly_counts$n_planets)
+N <- nrow(yearly_counts)
+alpha_post <- alpha_prior + sum_y
+beta_post <- beta_prior + N
+
+theoretical_post_mean = alpha_post / beta_post
+cat("Theoretical Posterior Mean:", theoretical_post_mean)
+```
+
+## MCMC Implementation
+
+```{r}
 poisson_stan_code <- "
 data {
   int<lower=0> N;
@@ -110,42 +138,52 @@ mcmc_acf(as.array(poisson_fit), pars = "lambda")
 summary(poisson_fit)$summary[, c("Rhat", "n_eff")]
 ```
 
-
-## Closed Form Posterior
-We model: 
-
-$$\lambda | y \sim Gamma(a + \Sigma y, \beta + N)$$
-
-```{r}
-alpha_prior <- 2
-beta_prior <- 0.1
-
-sum_y <- sum(yearly_counts$n_planets)
-N <- nrow(yearly_counts)
-alpha_post <- alpha_prior + sum_y
-beta_post <- beta_prior + N
-
-#posterior mean
-alpha_post / beta_post
-```
-
 ## Comparison with MCMC mean
 ```{r}
 posterior_samples <- extract(poisson_fit)$lambda
-mean(posterior_samples)
+mcmc_mean <- mean(posterior_samples)
+
+# Create a comparison table
+comparison_df <- data.frame(
+  Method = c("Theoretical (Exact)", "MCMC (Approximation)"),
+  Posterior_Mean = c(theoretical_post_mean, mcmc_mean)
+  )
+
+print(comparison_df)
+
+mcmc_dens(as.array(poisson_fit), pars = "lambda") +
+  stat_function(
+    fun = dgamma, 
+    args = list(shape = alpha_post, rate = beta_post), 
+    color = "red", 
+    size = 1.2
+  ) +
+  yaxis_text(TRUE) + 
+  ylab("density")
 ```
 
 Here, we modeled the yearly number of exoplanet discoveries using a Poisson likelihood with $Gamma (2,0.1)$ prior on the rate parameter $\gamma$. 
 We estimated the posterior distribution using Hamiltonian Monte Carlo via Stan. Trace plots, density plots, and autocorrelation diagnostics indicate good chain mixing, given R-hat values hover around 1.00 and effective sample sizes appear high.
 We also derived the closed-form Gamma posterior due to conjugacy and found strong agreement between the theoretical posterior mean and the MCMC based posterior mean, confirming correct model implementation and convergence
 
+# Bayesian estimation(Continuous)
 
-## Stan model, MCMC
+## Parameter Definition and Likelihood
 
-We model:
+We are interested in estimating the average orbital period of exoplanets (on the logarithmic scale). Let $y_i$ represent the log-period of the i-th planet. We model these values using a Normal likelihood with unknown mean μ and standard deviation σ:
 $$y_i \sim \mathcal{N}(\mu, \sigma)$$
+## Prior Selection and Justification
+We assign independent priors to the parameters μ and σ.
+Mean (μ):
 $$\mu \sim \mathcal{N}(5, 5)$$
-$$\sigma \sim \text{Cauchy}(0, 5)$$
+On the natural scale, a log-mean of 5 corresponds to ≈148 days. A standard deviation of 5 on the log scale is very broad, covering orbital periods from hours to centuries. This serves as a weakly informative prior, centering the search on plausible values while allowing the data to drive the result.
+
+Standard Deviation (σ):
+$$\sigma \sim \text{Normal}(0, 5)$$
+We use a Half-Normal prior (since σ>0) with a scale of 5. This allows for a wide range of variability in the data without being overly restrictive.
+
+## Closed Form Posterior
+Because we have chosen independent Normal priors for μ and σ , a closed-form analytical solution for the joint posterior distribution does not exist. Therefore, we rely entirely on the MCMC diagnostics to verify our results.
 
 ```{r}
 y_val <- clean_data$log_period
@@ -175,7 +213,7 @@ parameters {
 model {
   // Priors
   mu ~ normal(mu0, tau0);
-  sigma ~ cauchy(0, 5); // Half-cauchy for scale
+  sigma ~ normal(0, 5);
   
   // Likelihood
   y ~ normal(mu, sigma);
@@ -185,7 +223,7 @@ model {
 fit_continuous <- stan(
   model_code = continuous_stan_code,
   data = stan_data_continuous,
-  iter = 10000,
+  iter = 2000,
   chains = 4
 )
 ```
@@ -222,27 +260,6 @@ mcmc_acf(as.array(fit_continuous), pars = c("mu", "sigma")) +
 summary(fit_continuous)$summary[, c("Rhat", "n_eff")]
 ```
 
-## Closed Form Posterior (Approximate)
-
-Assuming $\sigma$ is fixed at the sample standard deviation, we compare against the conjugate Normal-Normal update:
-
-$$\frac{1}{\sigma^2_{post}} = \frac{1}{\tau_0^2} + \frac{N}{\sigma^2_{data}}$$
-$$\mu_{post} = \sigma^2_{post} \left( \frac{\mu_0}{\tau_0^2} + \frac{N\bar{y}}{\sigma^2_{data}} \right)$$
-
-```{r}
-sigma_data <- sd(y_val)
-y_bar      <- mean(y_val)
-
-prior_prec <- 1 / (mu_prior_sd^2)
-data_prec  <- N_val / (sigma_data^2)
-
-post_var_theo <- 1 / (prior_prec + data_prec)
-
-# Posterior mean
-post_mean_theo <- post_var_theo * ( (mu_prior_mean * prior_prec) + (y_bar * data_prec) )
-post_mean_theo
-```
-
 ## Comparison with MCMC mean
 
 ```{r}
@@ -250,13 +267,13 @@ mcmc_mean <- summary(fit_continuous)$summary["mu", "mean"]
 mcmc_mean
 ```
 
-Here, we modeled the log period of exoplanets using a Normal likelihood with a Normal prior on the mean $\mu$ and a Half-Cauchy prior on $\sigma$.
+Here, we modeled the log period of exoplanets using a Normal likelihood with a Normal prior on the mean $\mu$ and a Half-Normal prior on $\sigma$.
 We estimated the posterior distribution using Hamiltonian Monte Carlo via Stan. Trace plots, density plots, and autocorrelation diagnostics indicate good chain mixing, given R-hat values hover around 1.00 and effective sample sizes appear high.
-We also derived the closed-form Normal posterior (conditional on $\sigma$ being known) and found strong agreement between the theoretical posterior mean and the MCMC based posterior mean, confirming correct model implementation and convergence.
 
 # Bayesian Regression Model
 
-We fit a multiple linear regression model to predict the log orbital period (`log_period`) based on stellar mass, effective temperature, metallicity, and the number of planets in the system.
+## Model Specification
+We fit a multiple linear regression model to predict the log orbital period (log_period) based on stellar mass, effective temperature, metallicity, and the number of planets in the system.
 
 The model specification is:
 
@@ -265,14 +282,19 @@ y_i \sim \mathcal{N}(\mu_i, \sigma)
 $$
 
 $$
-\mu_i = \alpha + \beta_1 (\text{log\_st\_mass}) + \beta_2 (\text{st\_teff\_k}) + \beta_3 (\text{st\_met}) + \beta_4 (\text{sy\_pnum})
+\mu_i = \alpha + \beta_1 (\text{log_st_mass}) + \beta_2 (\text{st_teff_k}) + \beta_3 (\text{st_met}) + \beta_4 (\text{sy_pnum})
 $$
 
-**Priors:**
 
-  * **Coefficients (**$\beta$**):** We use weakly informative Normal priors $\mathcal{N}(0, 2.5)$ (scaled). This assumes that without seeing the data, we expect the effect sizes to be relatively small but allows for larger effects if the data supports them.
-  * **Intercept (**$\alpha$**):** We use a Normal prior $\mathcal{N}(0, 10)$, centering the baseline expectation near 0 but with wide variance.
-  * **Auxiliary (**$\sigma$**):** We use an Exponential prior $\text{Exp}(1)$ for the error standard deviation, constraining it to be positive and penalizing extremely large residual variance.
+## Prior Selection
+* Coefficients ($\beta$): $\beta \sim \mathcal{N}(0, 2.5)$
+    We use weakly informative Normal priors. This assumes that, without seeing the data, we expect the effect sizes to be relatively small, but the variance of 2.5 allows for larger effects if the data strongly supports them.
+
+* Intercept ($\alpha$): $\alpha \sim \mathcal{N}(0, 10)$
+    A broad Normal prior centers the baseline expectation near 0 but allows for a wide range of baseline log-periods.
+
+* Auxiliary ($\sigma$): $\sigma \sim \text{Exp}(1)$
+    We use an Exponential prior for the error standard deviation to strictly constrain it to positive values and penalize extremely large residual variances.
 
 ```{r}
 # Fit the model using rstanarm
@@ -324,6 +346,19 @@ mcmc_acf(posterior_arr, pars = c("log_st_mass", "sy_pnum", "sigma")) +
 
 ```{r}
 summary(fit_stanarm)[, c("Rhat", "n_eff")]
+```
+
+### Prior vs. Posterior Comparison
+
+We compared the posterior distributions to the priors to ensure our results were driven by the data rather than our initial assumptions.
+
+The plot below shows that the posterior distributions (dark blue) for parameters like `log_st_mass` and `sy_pnum` are significantly narrower and shifted compared to the broad, weakly informative priors (light lines). This indicates that the data provided strong information to update our beliefs.
+
+```{r}
+posterior_vs_prior(fit_stanarm, pars = c("log_st_mass", "sy_pnum", "st_teff_k", "st_met")) +
+  ggplot2::ggtitle("Prior vs Posterior Distributions") +
+  ggplot2::theme_minimal()
+
 ```
 
 ## Results and Interpretation
@@ -378,6 +413,45 @@ This checks if the data generated by the model looks like the observed data.
 pp_check(fit_stanarm) + ggtitle("Posterior Predictive Check")
 ```
 
+### Residuals vs Fitted Values
+We check the assumption of homoscedasticity (constant variance) by plotting residuals against fitted values. We look for a random scatter around 0. If we saw a "funnel" shape, it would indicate non-constant variance.
+
+```{r}
+mean_preds <- colMeans(posterior_predict(fit_stanarm))
+residuals <- clean_data$log_period - mean_preds
+
+tibble(Fitted = mean_preds, Residuals = residuals) %>%
+  ggplot(aes(x = Fitted, y = Residuals)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values",
+       subtitle = "Check for homoscedasticity (random scatter expected)",
+       x = "Fitted Values (Log Period)",
+       y = "Residuals") +
+  theme_minimal()
+```
+
+
+```{r}
+# Residuals vs Specific Predictors (Linearity Check)
+clean_data_plot <- clean_data %>%
+  mutate(residuals = residuals) # Use the residuals calculated in your previous chunk
+
+# Plot against Mass
+p1 <- ggplot(clean_data_plot, aes(x = log_st_mass, y = residuals)) +
+  geom_point() + geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggtitle("Residuals vs Stellar Mass")
+
+# Plot against Temperature
+p2 <- ggplot(clean_data_plot, aes(x = st_teff_k, y = residuals)) +
+  geom_point() + geom_smooth(method = "loess", se = FALSE, color = "blue") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  ggtitle("Residuals vs Temp")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
 ### Cross Validation (LOO)
 
 We use the PSIS-LOO approximation to estimate the out-of-sample predictive performance.
@@ -386,3 +460,5 @@ We use the PSIS-LOO approximation to estimate the out-of-sample predictive perfo
 loo_result <- loo(fit_stanarm)
 print(loo_result)
 ```
+
+
