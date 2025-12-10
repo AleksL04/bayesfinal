@@ -299,17 +299,22 @@ $$
 ```{r}
 # Fit the model using rstanarm
 fit_stanarm <- stan_glm(
-  log_period ~ log_st_mass + st_teff_k + st_met + sy_pnum,
+  # poly(x, 2) fits a curve: intercept + linear_term + squared_term
+  log_period ~ poly(log_st_mass, 2) + poly(st_teff_k, 2) + st_met + sy_pnum,
+  
   data = clean_data,
   family = gaussian(),
   
+  # Increasing adapt_delta slightly can help with non-linear terms if chains get stuck
+  control = list(adapt_delta = 0.95),
+  
   prior = normal(location = 0, scale = 2.5, autoscale = TRUE),
   prior_intercept = normal(location = 0, scale = 10, autoscale = TRUE),
-  prior_aux = exponential(rate = 1, autoscale = TRUE), 
+  prior_aux = exponential(rate = 1, autoscale = TRUE),
   
   chains = 4,
   iter = 2000,
-  seed = 123
+  seed = 42
 )
 ```
 
@@ -320,26 +325,30 @@ We apply the same MCMC diagnostics used in the previous sections to ensure conve
 ### Trace Plots
 
 ```{r}
-# Convert stanreg object to array for bayesplot functions
 posterior_arr <- as.array(fit_stanarm)
 
-# Plotting trace for a subset of interesting parameters
-mcmc_trace(posterior_arr, pars = c("(Intercept)", "log_st_mass", "sy_pnum", "sigma")) +
+mcmc_trace(posterior_arr, 
+           pars = c("(Intercept)", "sy_pnum", "sigma"),
+           regex_pars = c("log_st_mass", "st_teff_k")) +
   ggtitle("Trace Plots for Regression Coefficients")
 ```
 
 ### Density Plots
 
 ```{r}
-mcmc_dens(posterior_arr, pars = c("log_st_mass", "sy_pnum", "sigma")) +
+mcmc_dens(posterior_arr, 
+          pars = c("sy_pnum", "sigma"),
+          regex_pars = "log_st_mass") +
   ggtitle("Posterior Density for Select Parameters")
 ```
 
 ### Autocorrelation
 
 ```{r}
-mcmc_acf(posterior_arr, pars = c("log_st_mass", "sy_pnum", "sigma")) +
-  ggtitle("Autocorrelation for Regression Parameters")
+mcmc_acf(posterior_arr, 
+         pars = c("sy_pnum", "sigma"),
+         regex_pars = "log_st_mass") +
+  ggtitle("Autocorrelation")
 ```
 
 ### R-Hat and Effective Sample Size
@@ -355,7 +364,7 @@ We compared the posterior distributions to the priors to ensure our results were
 The plot below shows that the posterior distributions (dark blue) for parameters like `log_st_mass` and `sy_pnum` are significantly narrower and shifted compared to the broad, weakly informative priors (light lines). This indicates that the data provided strong information to update our beliefs.
 
 ```{r}
-posterior_vs_prior(fit_stanarm, pars = c("log_st_mass", "sy_pnum", "st_teff_k", "st_met")) +
+posterior_vs_prior(fit_stanarm, pars = c("sy_pnum", "st_met", "(Intercept)")) +
   ggplot2::ggtitle("Prior vs Posterior Distributions") +
   ggplot2::theme_minimal()
 
@@ -430,27 +439,38 @@ tibble(Fitted = mean_preds, Residuals = residuals) %>%
        y = "Residuals") +
   theme_minimal()
 ```
-
-
+# Linearity Check
 ```{r}
-# Residuals vs Specific Predictors (Linearity Check)
-clean_data_plot <- clean_data %>%
-  mutate(residuals = residuals) # Use the residuals calculated in your previous chunk
+poly_residuals <- resid(fit_poly)
 
-# Plot against Mass
-p1 <- ggplot(clean_data_plot, aes(x = log_st_mass, y = residuals)) +
-  geom_point() + geom_smooth(method = "loess", se = FALSE, color = "blue") +
+# If resid() returns a matrix (chains x obs), take the column means:
+if(is.matrix(poly_residuals)) {
+  poly_residuals <- colMeans(poly_residuals)
+}
+
+clean_data_poly_plot <- clean_data %>%
+  mutate(residuals = poly_residuals)
+
+# 2. Plot Residuals vs Mass (Checking if the curve is gone)
+p_poly1 <- ggplot(clean_data_poly_plot, aes(x = log_st_mass, y = residuals)) +
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
   geom_hline(yintercept = 0, linetype = "dashed") +
-  ggtitle("Residuals vs Stellar Mass")
+  ggtitle("Poly Model: Residuals vs Mass") +
+  theme_minimal()
 
-# Plot against Temperature
-p2 <- ggplot(clean_data_plot, aes(x = st_teff_k, y = residuals)) +
-  geom_point() + geom_smooth(method = "loess", se = FALSE, color = "blue") +
+# 3. Plot Residuals vs Temperature (Checking if the curve is gone)
+p_poly2 <- ggplot(clean_data_poly_plot, aes(x = st_teff_k, y = residuals)) +
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "loess", se = FALSE, color = "blue") +
   geom_hline(yintercept = 0, linetype = "dashed") +
-  ggtitle("Residuals vs Temp")
+  ggtitle("Poly Model: Residuals vs Temp") +
+  theme_minimal()
 
-gridExtra::grid.arrange(p1, p2, ncol = 2)
+gridExtra::grid.arrange(p_poly1, p_poly2, ncol = 2)
 ```
+
+
 
 ### Cross Validation (LOO)
 
